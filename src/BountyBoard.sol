@@ -7,19 +7,22 @@ import "./IBountyBoard.sol";
 
 import "./Types.sol";
 
-contract BountyBoard is Ownable, ReentrancyGuard {
+contract BountyBoard is IBountyBoard, Ownable, ReentrancyGuard {
     uint256 public constant PLATFORM_FEE_PERCENTAGE = 5;
-    uint256 bountyIdCounter;
+    uint256 public bountyIdCounter;
 
     mapping(uint256 => Bounty) public bounties;
     mapping(address => uint256[]) public userBounties;
+    mapping(uint256 => Submission[]) public bountySubmissions;
+    mapping(uint256 => mapping(address => bool)) public isParticipant;
+
+    uint256 public feeCollected;
 
     constructor() Ownable(msg.sender) {}
 
     /**
      * @dev Creates a new bounty
      * @param _cid The CID of the bounty
-     * @param _prize The total prize amount for the bounty
      * @param _deadline The deadline for submissions
      * @param _resultDeadline The deadline for announcing results
      * @param _minParticipants Minimum number of participants required
@@ -29,15 +32,13 @@ contract BountyBoard is Ownable, ReentrancyGuard {
      */
     function createBounty(
         string memory _cid,
-        uint256 _prize,
         uint256 _deadline,
         uint256 _resultDeadline,
         uint16 _minParticipants,
         uint16 _totalWinners,
         uint256[] memory _prizes,
         BountyType _bountyType
-    ) external payable nonReentrant {
-        require(_prize > 0, "BountyBoard: ZERO_PRIZE");
+    ) external payable override nonReentrant returns (uint256) {
         require(_deadline > block.timestamp, "BountyBoard: PAST_DEADLINE");
         require(_resultDeadline > _deadline, "BountyBoard: INVALID_RESULT_DEADLINE");
         require(_minParticipants > 0, "BountyBoard: ZERO_PARTICIPANTS");
@@ -57,7 +58,6 @@ contract BountyBoard is Ownable, ReentrancyGuard {
             totalWinners: _totalWinners,
             prizes: _prizes,
             selectedWinners: new address[](0),
-            status: BountyStatus.OPEN,
             bountyType: _bountyType
         });
 
@@ -77,6 +77,8 @@ contract BountyBoard is Ownable, ReentrancyGuard {
         );
 
         bountyIdCounter++;
+
+        return bountyIdCounter - 1;
     }
 
     /**
@@ -119,6 +121,7 @@ contract BountyBoard is Ownable, ReentrancyGuard {
         if (msg.value < totalPrizeAmount + platformFee) {
             revert BountyBoard__InsufficientFunds(msg.value, totalPrizeAmount + platformFee);
         }
+        feeCollected += platformFee;
     }
 
     /**
@@ -139,10 +142,11 @@ contract BountyBoard is Ownable, ReentrancyGuard {
         uint16 _minParticipants,
         uint16 _totalWinners,
         uint256[] memory _prizes
-    ) external payable nonReentrant {
+    ) external payable override nonReentrant {
         Bounty storage bounty = bounties[_bountyId];
         require(bounty.isActive, "BountyBoard: BOUNTY_NOT_FOUND");
         require(bounty.creator == msg.sender, "BountyBoard: NOT_CREATOR");
+        require(bounty.bountyType == BountyType.EDITABLE, "BountyBoard: NON_EDITABLE_BOUNTY");
 
         bounty.cid = _cid;
         bounty.deadline = _deadline;
@@ -153,7 +157,7 @@ contract BountyBoard is Ownable, ReentrancyGuard {
 
         _checkPrieAndFee(_prizes);
 
-        emit BountyCreated(
+        emit BountyUpdated(
             bounty.id,
             msg.sender,
             _cid,
@@ -164,6 +168,194 @@ contract BountyBoard is Ownable, ReentrancyGuard {
             _prizes,
             bounty.bountyType
         );
+    }
+
+    /**
+     * @dev Allows the creator to select winners for the bounty and distribute prizes
+     * @param _bountyId The ID of the bounty
+     * @param _winners Array of addresses of the selected winners
+     */
+    function selectWinners(uint256 _bountyId, address[] calldata _winners) external override {
+        Bounty storage bounty = bounties[_bountyId];
+
+        require(bounty.isActive, "BountyBoard: BOUNTY_NOT_FOUND");
+        require(bounty.creator == msg.sender, "BountyBoard: NOT_CREATOR");
+        require(_winners.length == bounty.totalWinners, "BountyBoard: WINNERS_MISMATCH");
+        require(bounty.selectedWinners.length == 0, "BountyBoard: WINNERS_ALREADY_SELECTED");
+        require(bounty.minParticipants <= _winners.length, "BountyBoard: NOT_ENOUGH_PARTICIPANTS");
+        require(block.timestamp <= bounty.resultDeadline, "BountyBoard: RESULT_DEADLINE_PASSED");
+        require(block.timestamp >= bounty.deadline, "BountyBoard: SUBMISSION_DEADLINE_NOT_REACHED");
+
+        _validateWinners(_winners, bounty.creator);
+
+        _verifyParticipants(_bountyId, _winners);
+
+        _distributePrizes(_winners, bounty.prizes);
+
+        bounty.selectedWinners = _winners;
+        bounty.isActive = false;
+        emit WinnersSelected(_bountyId, _winners);
+    }
+
+    /**
+     * @dev Internal function to validate winner addresses
+     */
+    function _validateWinners(address[] calldata _winners, address _creator) internal pure {
+        for (uint256 i = 0; i < _winners.length; i++) {
+            require(_winners[i] != address(0), "BountyBoard: INVALID_WINNER");
+            require(_winners[i] != _creator, "BountyBoard: CREATOR_CANNOT_WIN");
+
+            for (uint256 j = i + 1; j < _winners.length; j++) {
+                require(_winners[i] != _winners[j], "BountyBoard: WINNERS_NOT_UNIQUE");
+            }
+        }
+    }
+
+    /**
+     * @dev Internal function to verify all winners are participants
+     */
+    function _verifyParticipants(uint256 _bountyId, address[] calldata _winners) internal view {
+        for (uint256 i = 0; i < _winners.length; i++) {
+            require(isParticipant[_bountyId][_winners[i]], "BountyBoard: WINNER_NOT_PARTICIPANT");
+        }
+    }
+
+    /**
+     * @dev Internal function to distribute prizes
+     */
+    function _distributePrizes(address[] calldata _winners, uint256[] storage _prizes) internal {
+        uint256 totalPrize;
+        for (uint256 i = 0; i < _winners.length; i++) {
+            totalPrize += _prizes[i];
+        }
+        require(address(this).balance >= totalPrize, "BountyBoard: INSUFFICIENT_FUNDS");
+
+        for (uint256 i = 0; i < _winners.length; i++) {
+            address winner = _winners[i];
+            uint256 prize = _prizes[i];
+
+            (bool success,) = winner.call{value: prize}("");
+            require(success, "BountyBoard: TRANSFER_FAILED");
+        }
+    }
+
+    /**
+     * @dev Allows a participant to submit their work for a bounty
+     * @param _bountyId The ID of the bounty
+     * @param _cid The CID of the submission
+     */
+    function createSubmission(uint256 _bountyId, string memory _cid) external override {
+        Bounty storage bounty = bounties[_bountyId];
+        require(bounty.isActive, "BountyBoard: BOUNTY_NOT_FOUND");
+        require(msg.sender != address(0), "BountyBoard: INVALID_PARTICIPANT");
+        require(msg.sender != bounty.creator, "BountyBoard: CREATOR_CANNOT_SUBMIT");
+        require(block.timestamp <= bounty.deadline, "BountyBoard: SUBMISSION_DEADLINE_PASSED");
+        require(!isParticipant[_bountyId][msg.sender], "BountyBoard: ALREADY_PARTICIPATED");
+
+        Submission memory newSubmission = Submission({cid: _cid, participant: msg.sender, timestamp: block.timestamp});
+
+        bountySubmissions[_bountyId].push(newSubmission);
+        isParticipant[_bountyId][msg.sender] = true;
+
+        emit SubmissionCreated(_bountyId, _cid, msg.sender, block.timestamp);
+    }
+
+    /**
+     * @dev Allows a participant to edit their submission
+     * @param _bountyId The ID of the bounty
+     * @param _cid The new CID of the submission
+     * @param _submissionIndex The index of the submission in the array
+     */
+    function editSubmision(uint256 _bountyId, string memory _cid, uint256 _submissionIndex) external override {
+        Bounty storage bounty = bounties[_bountyId];
+        require(bounty.isActive, "BountyBoard: BOUNTY_NOT_FOUND");
+        require(msg.sender != address(0), "BountyBoard: INVALID_PARTICIPANT");
+        require(msg.sender != bounty.creator, "BountyBoard: CREATOR_CANNOT_SUBMIT");
+
+        Submission storage submission = bountySubmissions[_bountyId][_submissionIndex];
+        require(submission.participant == msg.sender, "BountyBoard: NOT_SUBMISSION_OWNER");
+
+        submission.cid = _cid;
+
+        emit SubmissionUdpated(_bountyId, _cid, msg.sender, block.timestamp);
+    }
+
+    /**
+     * @dev Allows the creator to cancel a bounty
+     * @param _bountyId The ID of the bounty
+     */
+    function cancelBounty(uint256 _bountyId) external override {
+        Bounty storage bounty = bounties[_bountyId];
+        require(bounty.isActive, "BountyBoard: BOUNTY_NOT_FOUND");
+        require(bounty.creator == msg.sender, "BountyBoard: NOT_CREATOR");
+        require(bounty.selectedWinners.length == 0, "BountyBoard: WINNERS_ALREADY_SELECTED");
+        require(bounty.minParticipants > bountySubmissions[_bountyId].length, "BountyBoard: NOT_ENOUGH_PARTICIPANTS");
+        require(bounty.resultDeadline < block.timestamp, "BountyBoard: RESULT_DEADLINE_NOT_REACHED");
+
+        bounty.isActive = false;
+
+        // Refund the creator
+        uint256 totalPrize;
+        for (uint256 i = 0; i < bounty.prizes.length; i++) {
+            totalPrize += bounty.prizes[i];
+        }
+
+        require(address(this).balance >= totalPrize, "BountyBoard: INSUFFICIENT_FUNDS");
+        (bool success,) = msg.sender.call{value: totalPrize}("");
+        require(success, "BountyBoard: TRANSFER_FAILED");
+
+        emit BountyCancelled(bounty.id);
+    }
+
+    // HELPER FUNCTIONS
+
+    /**
+     * @dev Returns the list of bounties created by a user
+     * @param _bountyId bountyId
+     * @return The bounty object
+     */
+    function getBounty(uint256 _bountyId) public view returns (Bounty memory) {
+        return bounties[_bountyId];
+    }
+
+    /**
+     * @dev Returns the list of bounties created by a user
+     * @param _creator The address of the creator
+     * @return The list of bounty IDs created by the user
+     */
+    function getUserBounties(address _creator) public view returns (uint256[] memory) {
+        return userBounties[_creator];
+    }
+
+    /**
+     * @dev Returns the list of submissions for a bounty
+     * @param _bountyId The ID of the bounty
+     * @return The list of submissions for the bounty
+     */
+    function getBountySubmissions(uint256 _bountyId) public view returns (Submission[] memory) {
+        return bountySubmissions[_bountyId];
+    }
+
+    /**
+     * @dev Returns the list of submissions for a bounty
+     * @param _bountyId The ID of the bounty
+     * @param _participant The address of the participant
+     * @return True if the address is a participant, false otherwise
+     */
+    function isParticipantOfBounty(uint256 _bountyId, address _participant) public view returns (bool) {
+        return isParticipant[_bountyId][_participant];
+    }
+
+    // ADMIN FUNCTIONS
+    /**
+     * @dev Allows the owner to withdraw collected fees
+     * @param _amount The amount to withdraw
+     */
+    function withdraw(uint256 _amount) external override onlyOwner {
+        require(_amount <= feeCollected, "BountyBoard: INSUFFICIENT_FUNDS");
+        (bool success,) = msg.sender.call{value: _amount}("");
+        require(success, "BountyBoard: TRANSFER_FAILED");
+        feeCollected -= _amount;
     }
 
     receive() external payable {}
