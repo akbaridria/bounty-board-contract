@@ -2,11 +2,12 @@
 pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./IBountyBoard.sol";
 
 import "./Types.sol";
 
-contract BountyBoard is Ownable {
+contract BountyBoard is Ownable, ReentrancyGuard {
     uint256 public constant PLATFORM_FEE_PERCENTAGE = 5;
     uint256 bountyIdCounter;
 
@@ -35,7 +36,7 @@ contract BountyBoard is Ownable {
         uint16 _totalWinners,
         uint256[] memory _prizes,
         BountyType _bountyType
-    ) external payable {
+    ) external payable nonReentrant {
         require(_prize > 0, "BountyBoard: ZERO_PRIZE");
         require(_deadline > block.timestamp, "BountyBoard: PAST_DEADLINE");
         require(_resultDeadline > _deadline, "BountyBoard: INVALID_RESULT_DEADLINE");
@@ -138,7 +139,7 @@ contract BountyBoard is Ownable {
         uint16 _minParticipants,
         uint16 _totalWinners,
         uint256[] memory _prizes
-    ) external payable {
+    ) external payable nonReentrant {
         Bounty storage bounty = bounties[_bountyId];
         require(bounty.isActive, "BountyBoard: BOUNTY_NOT_FOUND");
         require(bounty.creator == msg.sender, "BountyBoard: NOT_CREATOR");
