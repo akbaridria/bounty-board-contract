@@ -43,10 +43,7 @@ contract BountyBoard is Ownable {
         require(_totalWinners > 0, "BountyBoard: ZERO_WINNERS");
         require(_prizes.length == _totalWinners, "BountyBoard: PRIZES_WINNERS_MISMATCH");
 
-        (uint256 totalPrizeAmount, uint256 platformFee) = calculatePrizesAndFee(_prizes);
-        if (msg.value < totalPrizeAmount + platformFee) {
-            revert BountyBoard__InsufficientFundsForBountyCreation(msg.value, totalPrizeAmount + platformFee);
-        }
+        _checkPrieAndFee(_prizes);
 
         Bounty memory newBounty = Bounty({
             id: bountyIdCounter,
@@ -110,6 +107,62 @@ contract BountyBoard is Ownable {
      */
     function _calculatePlatformFee(uint256 _amount) internal pure returns (uint256) {
         return (_amount * PLATFORM_FEE_PERCENTAGE) / 100;
+    }
+
+    /**
+     * @dev Checks if the user has sent enough funds to cover the total prize amount and platform fee
+     * @param _prizes Array of individual prize amounts
+     */
+    function _checkPrieAndFee(uint256[] memory _prizes) internal {
+        (uint256 totalPrizeAmount, uint256 platformFee) = calculatePrizesAndFee(_prizes);
+        if (msg.value < totalPrizeAmount + platformFee) {
+            revert BountyBoard__InsufficientFunds(msg.value, totalPrizeAmount + platformFee);
+        }
+    }
+
+    /**
+     * @dev Edits an existing bounty
+     * @param _bountyId The ID of the bounty to edit
+     * @param _cid The new CID of the bounty
+     * @param _deadline The new deadline for submissions
+     * @param _resultDeadline The new deadline for announcing results
+     * @param _minParticipants Minimum number of participants required
+     * @param _totalWinners Total number of winners to be selected
+     * @param _prizes Array of individual prize amounts for each winner
+     */
+    function editBounty(
+        uint256 _bountyId,
+        string memory _cid,
+        uint256 _deadline,
+        uint256 _resultDeadline,
+        uint16 _minParticipants,
+        uint16 _totalWinners,
+        uint256[] memory _prizes
+    ) external payable {
+        Bounty storage bounty = bounties[_bountyId];
+        require(bounty.isActive, "BountyBoard: BOUNTY_NOT_FOUND");
+        require(bounty.creator == msg.sender, "BountyBoard: NOT_CREATOR");
+
+        bounty.cid = _cid;
+        bounty.deadline = _deadline;
+        bounty.resultDeadline = _resultDeadline;
+        bounty.minParticipants = _minParticipants;
+        bounty.totalWinners = _totalWinners;
+        bounty.prizes = _prizes;
+
+        _checkPrieAndFee(_prizes);
+
+        emit BountyCreated(
+            bounty.id,
+            msg.sender,
+            _cid,
+            _deadline,
+            _resultDeadline,
+            _minParticipants,
+            _totalWinners,
+            _prizes,
+            bounty.bountyType
+        );
     }
 
     receive() external payable {}

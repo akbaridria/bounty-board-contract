@@ -15,7 +15,7 @@ event BountyCreated(
 );
 
 // this is errors
-error BountyBoard__InsufficientFundsForBountyCreation(uint256 amountUser, uint256 amountRequired);
+error BountyBoard__InsufficientFunds(uint256 amountUser, uint256 amountRequired);
 
 // this is interfaces/types
 enum BountyType {
